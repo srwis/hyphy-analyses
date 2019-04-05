@@ -15,8 +15,7 @@ Editing the newick files by hand is inefficient and confusing. We suggest using 
 ## Running the Analysis
 To run a MEDS analysis, a nucleotide coding sequence alignment and a rooted newick tree with tagged foreground are needed. Executing the batch file will prompt for the tree and data file. The underlying nucleotide substitution model is REV, but any 6 character nucleotide model string (010010 for HKY85, 012345 for REV) can be specified by modifying the batch file. MEDS can take quite some time and should be run in HyPhy's command line mode. A small reverse transcriptase demo alignment (MEDSdemo.fas) and phylogeny (MEDSdemo.nwk) are available.
 
-## The Output File
-
+## The Output
 The output for a MEDS analysis is a file containing, for each site, the maximized likelihood values for a null model, an episodic diversifying model (FEEDS), and 21 MEDS analyses: one for each amino acid (including stop codons, although these never occur in coding sequences, so that test is never run). For computational convenience, the directional model is only optimized for amino acids that are actually observed at the site in question, and omission codes (-99) are used as place holders for parameter values for amino acids that don't occur. Don't be alarmed if these appear almost everywhere: only a handful of amino acids occur at any particular site.
 
 Also, a re-parameterized version of the ωT parameters are reported. ωT is the target amino acid rate multiplier. To improve optimization speed, we re-parameterized ωT = ((1/(1-xT))-1), and optimized the xT parameters. The values reported in the output file are actually the maximum likelihood xT values.
@@ -26,5 +25,4 @@ To make things simple, a python script for processing the results files is avail
 ```
 python MEDSproc.py <resultsFile.csv> <alphaLevel>
 ```
-
 All sites and substitutions with significant directional or diversifying selection are returned, along with the corresponding maximum likelihood parameter values for the null and alternative models. The xT parameters are also transformed into ωT values.
