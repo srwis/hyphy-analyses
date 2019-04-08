@@ -10,6 +10,8 @@ LoadFunctionLibrary("libv3/models/codon/MG_REV.bf");
 LoadFunctionLibrary("SelectionAnalyses/modules/io_functions.ibf");
 LoadFunctionLibrary("SelectionAnalyses/modules/selection_lib.ibf");
 
+utility.SetEnvVariable ("NORMALIZE_SEQUENCE_NAMES", TRUE);
+
 /*----------Branch-Site Directional Selection Analysis---------*/
 /*Usage: Takes an alignment and a tree (with foreground branches tagged with "{FG}"), a nucleotide model
 string ("010010" for HKY85, "012345" for REV), a range of sites to test, and a site reference shift,
@@ -22,11 +24,31 @@ fitter.analysis_description = {terms.io.info : "RUNNING MEDS (Models for Episodi
                                terms.io.requirements : "codon alignment and a phylogenetic tree"
                               };
 
-//TODO: enable keywords
 
 /*--Analysis Setup--*/
 
 io.DisplayAnalysisBanner (fitter.analysis_description);
+//fprintf (stdout, "\n[RUNNING MEDS (Models for Episodic Directional Selection). For help please refer to https://github.com/veg/hyphy-analyses]\n");
+
+KeywordArgument ("code",        "Which genetic code should be used", "Universal");
+KeywordArgument ("alignment",   "An codon alignment in one of the formats supported by HyPhy");
+KeywordArgument ("tree",        "A labeled phylogenetic tree", null, "Please select a tree file for the data:");
+
+
+namespace fitter {
+    LoadFunctionLibrary ("SelectionAnalyses/modules/shared-load-file.bf");
+    load_file ({utility.getGlobalValue("terms.prefix"): "fitter", utility.getGlobalValue("terms.settings") : {utility.getGlobalValue("terms.settings.branch_selector") : "selection.io.SelectAllBranches"}});
+		}
+
+		fitter.json    = { terms.json.analysis: fitter.analysis_description,
+               terms.json.input: {},
+               terms.json.fits : {},
+               terms.json.timers : {},
+               fitter.terms.json.site_logl : {},
+               fitter.terms.json.evidence_ratios : {},
+               fitter.terms.json.site_reports : {}
+              };
+
 nucModelString 	= "012345";
 
 SetDialogPrompt ("Load a coding alignment");
