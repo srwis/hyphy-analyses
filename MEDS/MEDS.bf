@@ -6,6 +6,9 @@ LoadFunctionLibrary("libv3/tasks/estimators.bf");
 LoadFunctionLibrary("libv3/tasks/alignments.bf");
 LoadFunctionLibrary("libv3/tasks/trees.bf");
 LoadFunctionLibrary("libv3/models/codon/MG_REV.bf");
+LoadFunctionLibrary("libv3/models/DNA/GTR.bf");
+LoadFunctionLibrary("libv3/models/model_functions.bf");
+LoadFunctionLibrary("libv3/tasks/genetic_code.bf");
 
 LoadFunctionLibrary("SelectionAnalyses/modules/io_functions.ibf");
 LoadFunctionLibrary("SelectionAnalyses/modules/selection_lib.ibf");
@@ -30,43 +33,44 @@ fitter.analysis_description = {terms.io.info : "RUNNING MEDS (Models for Episodi
 io.DisplayAnalysisBanner (fitter.analysis_description);
 //fprintf (stdout, "\n[RUNNING MEDS (Models for Episodic Directional Selection). For help please refer to https://github.com/veg/hyphy-analyses]\n");
 
+fitter.json    = { terms.json.analysis: fitter.analysis_description,
+					 terms.json.input: {},
+					 terms.json.fits : {},
+					 terms.json.timers : {},
+					 fitter.terms.json.site_logl : {},
+					 fitter.terms.json.evidence_ratios : {},
+					 fitter.terms.json.site_reports : {}
+					};
+
 KeywordArgument ("code",        "Which genetic code should be used", "Universal");
 KeywordArgument ("alignment",   "An codon alignment in one of the formats supported by HyPhy");
-KeywordArgument ("tree",        "A labeled phylogenetic tree", null, "Please select a tree file for the data:");
-
+KeywordArgument ("tree",    "Please select a tree file for the data:");
+KeywordArgument ("branches", "Select Branches", "All");
 
 namespace fitter {
     LoadFunctionLibrary ("SelectionAnalyses/modules/shared-load-file.bf");
-    load_file ({utility.getGlobalValue("terms.prefix"): "fitter", utility.getGlobalValue("terms.settings") : {utility.getGlobalValue("terms.settings.branch_selector") : "selection.io.SelectAllBranches"}});
+    load_file ({utility.getGlobalValue("terms.prefix"): "fitter"});
 		}
 
-		fitter.json    = { terms.json.analysis: fitter.analysis_description,
-               terms.json.input: {},
-               terms.json.fits : {},
-               terms.json.timers : {},
-               fitter.terms.json.site_logl : {},
-               fitter.terms.json.evidence_ratios : {},
-               fitter.terms.json.site_reports : {}
-              };
+namespace fitter {
+    doGTR ("fitter");
+}
 
 nucModelString 	= "012345";
 
-SetDialogPrompt ("Load a coding alignment");
+
+
 /*---------Loading alignment and tree files-------------------------------------*/
 
-DataSet 		myData = ReadDataFile (PROMPT_FOR_FILE);
-fprintf (stdout, "Loaded ", myData.species, " sequences with ", myData.sites, " sites from ",LAST_FILE_PATH,"\n");
 
-SetDialogPrompt ("Load an annotated tree file");
-fscanf 			(PROMPT_FOR_FILE, "Raw", treeString);
+//fprintf (stdout, "Loaded ", myData.species, " sequences with ", myData.sites, " sites from ",LAST_FILE_PATH,"\n");
 
-SetDialogPrompt ("Specify the output (.csv) file");
-fprintf 		(PROMPT_FOR_FILE, CLEAR_FILE);
 
-outputFile 		= LAST_FILE_PATH;
+KeywordArgument ("output", "Write", "test.csv");
+//SetDialogPrompt ("Specify the output (.csv) file");
+
 
 siteShift 		= -1;  /*Used to standardize codon positions. Remember HyPhy indexes from 0, so siteShift = -1 will report first codon as 1*/
-
 
 /*--Code Overview:--*/
 /*
@@ -86,21 +90,35 @@ siteShift 		= -1;  /*Used to standardize codon positions. Remember HyPhy indexes
 */
 
 /*--Code--*/
-ACCEPT_ROOTED_TREES=1;
-_DO_TREE_REBALANCE_ = 0;
-COUNT_GAPS_IN_FREQUENCIES = 0;
+utility.SetEnvVariable ("ACCEPT_ROOTED_TREES", 1);
+utility.SetEnvVariable ("_DO_TREE_REBALANCE_", 0);
+utility.SetEnvVariable("COUNT_GAPS_IN_FREQUENCIES", 0);
 
-LoadFunctionLibrary ("chooseGeneticCode");
-countSenseCodons = + ({64,1}["IsStop(_MATRIX_ELEMENT_ROW_,_Genetic_Code)==0"]);
+//ACCEPT_ROOTED_TREES=1;
+//_DO_TREE_REBALANCE_ = 0;
+//COUNT_GAPS_IN_FREQUENCIES = 0;
+
+//LoadFunctionLibrary ("chooseGeneticCode");
+
+
+SenseCodons = genetic_code.CountSense(fitter.codon_data_info [utility.getGlobalValue("terms.code")]);
 
 
 /*---------Estimate Branch Lengths Using Nucleotide Model-----------------------*/
-DataSetFilter myFilter = CreateFilter (myData,1);
-HarvestFrequencies (obsNucFreqs, myFilter, 1, 1, 1);
+//DataSetFilter myFilter = CreateFilter (fitter.codon_data,1);
+//fprintf(stdout, "%s\n", myFilter);
+//HarvestFrequencies (obsNucFreqs, myFilter, 1, 1, 1);
+
+
+
+
 
 /*---------Begin Setting up custom nuc model---------------*/
 /*The parameters that the nucModelString indexes into*/
 nucBiasMult = {{"AC*","","AT*","CG*","CT*","GT*"}};
+
+//this pulls out the efv of the gtr results
+obsNucFreqs = (fitter.gtr_results[utility.getGlobalValue("terms.efv_estimate")])["VALUEINDEXORDER"][0];
 
 /*Initialises and populates a matrix of string values nuc multipliers*/
 customRateString = {{"*","","",""}
@@ -119,9 +137,12 @@ for (i=0; i<3; i+=1)
 	}
 }
 
+
+
 global AC = 1; global AT = 1; global CG = 1; global CT = 1; global GT = 1;
 
 /*To set up a nucleotide model, populate a string version of the rate matrix*/
+
 modelDefString = "";
 modelDefString * 16384;
 
@@ -148,26 +169,93 @@ for (i=0; i<4; i += 1)
 }
 modelDefString*"}";
 modelDefString*0;
+
 ExecuteCommands("nucModel = " + modelDefString);
 Model RT = (nucModel, obsNucFreqs);
 
-/*This is in case the treestring came with model assignments!*/
 Model FG = (nucModel, obsNucFreqs);
+/*This is in case the treestring came with model assignments!*/
+/*
+
+
+
+//q_ij and Q have to be functions but that seems overly complicated for this????
+lfunction FG (type) {
+        def = models.DNA.GTR.ModelDescription(type);
+        def [utility.getGlobalValue("terms.model.q_ij")] = modelDefString;
+
+	return def;
+
+
+}
+//right now only have a codon data filter and need a nuc one for this but idk how to get the nucleotide one
+//model.generic.DefineModel (model_spec, id, arguments, data_filter, estimator_type)
+FG = model.generic.DefineModel("models.DNA.GTR.ModelDescription",
+        name_space, {
+            "0": terms.local
+        },
+        fitter.filter_names,
+        None);
+*/
+//this doesn't work
+//model.define_from_components ("FG",modelDefString,obsNucFreqs,1);
+
+
+
 
 /*-----------End of defining nuc model------------*/
 
 
-/*FIDDLING WITH THE ROOTING. This (commented out) code reroots on an internal branch and is only certain to work on trees with external branches marked FG. This is removed and now only rooted trees are accepted.*/
+/*FIDDLING WITH THE ROOTING. This (commented out) code reroots on an internal
+branch and is only certain to work on trees with external branches marked FG.
+This is removed and now only rooted trees are accepted.*/
+
 /*
 Tree tempTree = treeString;
 treeString = RerootTree(treeString,BranchName(tempTree,0));
 */
-Tree givenTree = treeString;
-
+/*
+treeString = trees.GetTreeString(look_for_newick_tree);
+Tree givenTree = treeString[^"terms.data.tree"];
+*/
 fprintf (stdout, "\n\n[PHASE 1. Estimating Branch Lengths using a Nucleotide Model]\n");
-LikelihoodFunction theLikFun = (myFilter, givenTree, obsFreqs);
+
+/*
+LikelihoodFunction theLikFun = (fitter.nuc_filter, givenTree, obsFreqs);
 Optimize (paramValues, theLikFun);
 fprintf (stdout, theLikFun);
+*/
+
+fitter.partitions_and_trees = trees.LoadAnnotatedTreeTopology.match_partitions(
+    fitter.codon_data_info[terms.data.partitions],
+    fitter.name_mapping);
+
+fitter.trees = utility.Map(fitter.partitions_and_trees, "_partition_", '_partition_[terms.data.tree]');
+fitter.filter_specification = alignments.DefineFiltersForPartitions(fitter.partitions_and_trees, "fitter.codon_data" , "fitter.filter.", fitter.codon_data_info);
+fitter.filter_names = utility.Map (fitter.filter_specification, "_partition_", '_partition_[terms.data.name]');
+//fitter.store_tree_information();
+
+
+nucleotide_results = estimators.FitSingleModel_Ext ( fitter.filter_names, fitter.trees, "FG", fitter.gtr_results,
+   {
+        utility.getGlobalValue  ("terms.run_options.model_type"): utility.getGlobalValue("terms.global"),
+        utility.getGlobalValue  ("terms.run_options.retain_lf_object"): TRUE,
+        utility.getGlobalValue  ("terms.run_options.retain_model_object"): TRUE
+      }
+      );
+
+
+//estimators.BuildLFObject (lf_id, data_filter, tree, model_map, initial_values, model_objects, run_options)
+//estimators.BuildLFObject ("busted_sim.lf", busted_sim.filter_names,
+//busted_sim.trees, busted_sim.model_map, busted_sim.gtr_results, busted_sim.model_object_map, None);
+//fitter.model_object_map = { "busted_sim.background" : busted_sim.background.bsrel_model,
+                                //    "busted_sim.test" :       busted_sim.test.bsrel_model };
+
+//this doeadn't work yet either
+estimators.BuildLFObject("nuc.lf", fitter.filter_names, fitter.trees,
+                          fitter.model_map, fitter.gtr_results, fitter.model_object_map, None);
+
+
 
 /*---------end nuc model fit----------*/
 
@@ -209,7 +297,7 @@ function BuildCodonFrequencies (nucFreqMatrix)
 {
 
 	PIStop = 1.0; 		/* denominator */
-	result = {countSenseCodons,1};    /* resulting codon frequencies */
+	result = {SenseCodons,1};    /* resulting codon frequencies */
 	hshift = 0;         /* how many stop codons have been counted so far */
 
 	for (h=0; h<64; h=h+1) /* loop over all possible codons */
@@ -256,7 +344,7 @@ multiplers, derived above in the setup of the nuc model*/
 
 function PopulateModelMatrix (ModelMatrixName&, EFV, targetAA,customRateString,nonSynRateTag)
 {
-	ModelMatrixDimension = countSenseCodons;
+	ModelMatrixDimension = SenseCodons;
 	_localNucBiasMult = customRateString;
 	ModelMatrixName = {ModelMatrixDimension,ModelMatrixDimension};
 	modelDefString = "";
