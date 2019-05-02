@@ -9,6 +9,7 @@ LoadFunctionLibrary("libv3/models/codon/MG_REV.bf");
 LoadFunctionLibrary("libv3/models/DNA/GTR.bf");
 LoadFunctionLibrary("libv3/models/model_functions.bf");
 LoadFunctionLibrary("libv3/tasks/genetic_code.bf");
+LoadFunctionLibrary("libv3/convenience/math.bf");
 
 LoadFunctionLibrary("SelectionAnalyses/modules/io_functions.ibf");
 LoadFunctionLibrary("SelectionAnalyses/modules/selection_lib.ibf");
@@ -20,7 +21,7 @@ utility.SetEnvVariable ("NORMALIZE_SEQUENCE_NAMES", TRUE);
 string ("010010" for HKY85, "012345" for REV), a range of sites to test, and a site reference shift,
 which allows for alignments that don't start where they should*/
 
-fitter.analysis_description = {terms.io.info : "RUNNING MEDS (Models for Episodic Directional Selection). For help please refer to https://github.com/veg/hyphy-analyses .",
+meds.analysis_description = {terms.io.info : "RUNNING MEDS (Models for Episodic Directional Selection). For help please refer to https://github.com/veg/hyphy-analyses .",
                                terms.io.version : "1.1",
                                terms.io.authors : "Ben Murrell, Sergei L Kosakovsky Pond, Sadie Wisotsky",
                                terms.io.contact : "spond@temple.edu",
@@ -30,16 +31,16 @@ fitter.analysis_description = {terms.io.info : "RUNNING MEDS (Models for Episodi
 
 /*--Analysis Setup--*/
 
-io.DisplayAnalysisBanner (fitter.analysis_description);
+io.DisplayAnalysisBanner (meds.analysis_description);
 //fprintf (stdout, "\n[RUNNING MEDS (Models for Episodic Directional Selection). For help please refer to https://github.com/veg/hyphy-analyses]\n");
 
-fitter.json    = { terms.json.analysis: fitter.analysis_description,
+meds.json    = { terms.json.analysis: meds.analysis_description,
 					 terms.json.input: {},
 					 terms.json.fits : {},
 					 terms.json.timers : {},
-					 fitter.terms.json.site_logl : {},
-					 fitter.terms.json.evidence_ratios : {},
-					 fitter.terms.json.site_reports : {}
+					 meds.terms.json.site_logl : {},
+					 meds.terms.json.evidence_ratios : {},
+					 meds.terms.json.site_reports : {}
 					};
 
 KeywordArgument ("code",        "Which genetic code should be used", "Universal");
@@ -47,17 +48,412 @@ KeywordArgument ("alignment",   "An codon alignment in one of the formats suppor
 KeywordArgument ("tree",    "Please select a tree file for the data:");
 KeywordArgument ("branches", "Select Branches", "All");
 
-namespace fitter {
+namespace meds {
     LoadFunctionLibrary ("SelectionAnalyses/modules/shared-load-file.bf");
-    load_file ({utility.getGlobalValue("terms.prefix"): "fitter"});
-		}
-
-namespace fitter {
-    doGTR ("fitter");
+    load_file ({utility.getGlobalValue("terms.prefix"): "meds"});
 }
 
-nucModelString 	= "012345";
+meds.table_screen_output  = {{"Codon", "Partition", "alpha", "beta", "LRT", "Selection detected?"}};
+meds.table_output_options = {terms.table_options.header : TRUE, terms.table_options.minimum_column_width: 16, terms.table_options.align : "center"};
 
+
+//just setting this to right Now
+meds.srv = FALSE;
+meds.site_alpha = "Site relative synonymous rate";
+meds.site_beta = "Site relative non-synonymous rate (tested branches)";
+meds.site_beta_nuisance = "Site relative non-synonymous rate (untested branches)";
+
+// default cutoff for printing to screen
+meds.p_value = 0.1;
+
+
+//unsure if this is needed
+meds.branch_sets = {};
+
+utility.ForEachPair (meds.selected_branches[0], "_branch_", "_model_",
+"
+    utility.EnsureKey (meds.branch_sets, _model_);
+    meds.branch_sets[_model_] + _branch_;
+");
+
+meds.branch_class_count = utility.Array1D (meds.branch_sets);
+
+
+
+/** this will fit the GTR model to the data read previously
+    and populate the dictionary of results from the fit as
+    namespace.gtr_results (namespace is the argument you pass
+    to doGTR)
+*/
+
+namespace meds {
+    doGTR ("meds");
+}
+
+/** this is a standard library call to mark all global parameters of this fit as
+fixed for subsequent fits; this is accomplished by adding a "fix-me" (terms.fix)
+field to the parameter record  */
+
+estimators.fixSubsetOfEstimates(meds.gtr_results, meds.gtr_results[terms.global]);
+
+
+
+/** this will the MG94xREV model with multiple branch classes, each having its own
+    dN/dS. Branch lengths are proportional to those obtained with the GTR fit.
+    This will create 'namespace'.partitioned_mg_results
+*/
+
+namespace meds {
+    scaler_prefix = "meds.scaler";
+    doPartitionedMG ("meds", FALSE);
+}
+
+io.ReportProgressMessageMD ("MEDS", "codon-refit", "Improving branch lengths, nucleotide substitution biases, and global dN/dS ratios under a full codon model");
+
+meds.final_partitioned_mg_results = estimators.FitMGREV (meds.filter_names, meds.trees, meds.codon_data_info [terms.code], {
+    terms.run_options.model_type: terms.local,
+    terms.run_options.partitioned_omega: meds.selected_branches,
+    terms.run_options.retain_lf_object: TRUE
+}, meds.partitioned_mg_results);
+
+
+io.ReportProgressMessageMD("MEDS", "codon-refit", "* " + selection.io.report_fit (meds.final_partitioned_mg_results, 0, meds.codon_data_info[terms.data.sample_size]));
+meds.global_dnds = selection.io.extract_global_MLE_re (meds.final_partitioned_mg_results, "^" + terms.parameters.omega_ratio);
+
+utility.ForEach (meds.global_dnds, "_value_", 'io.ReportProgressMessageMD ("MEDS", "codon-refit", "* " + _value_[terms.description] + " = " + Format (_value_[terms.fit.MLE],8,4));');
+
+// define the site-level likelihood function
+
+meds.site.mg_rev = model.generic.DefineModel("models.codon.MG_REV.ModelDescription",
+        "meds_mg", {
+            "0": parameters.Quote(terms.local),
+            "1": meds.codon_data_info[terms.code]
+        },
+        meds.filter_names,
+        None);
+
+
+meds.site_model_mapping = {"meds_mg" : meds.site.mg_rev};
+
+
+
+/* set up the local constraint model */
+
+meds.alpha = model.generic.GetLocalParameter (meds.site.mg_rev, utility.getGlobalValue("terms.parameters.synonymous_rate"));
+meds.beta = model.generic.GetLocalParameter (meds.site.mg_rev, utility.getGlobalValue("terms.parameters.nonsynonymous_rate"));
+io.CheckAssertion ("None!=meds.alpha && None!=meds.beta", "Could not find expected local synonymous and non-synonymous rate parameters in \`estimators.FitMGREV\`");
+
+selection.io.startTimer (meds.json [terms.json.timers], "MEDS analysis", 2);
+
+//----------------------------------------------------------------------------------------
+
+// I think this function scales the branches by alpha and beta for each site????
+function meds.apply_proportional_site_constraint (tree_name, node_name, alpha_parameter, beta_parameter, alpha_factor, beta_factor, branch_length) {
+
+    meds.branch_length = (branch_length[terms.parameters.synonymous_rate])[terms.fit.MLE];
+
+    node_name = tree_name + "." + node_name;
+
+    ExecuteCommands ("
+        `node_name`.`alpha_parameter` := (`alpha_factor`) * meds.branch_length__;
+        `node_name`.`beta_parameter`  := (`beta_factor`)  * meds.branch_length__;
+    ");
+}
+//----------------------------------------------------------------------------------------
+//adds scalers to the global parameters
+meds.scalers = {{"meds.alpha_scaler", "meds.beta_scaler_test", "meds.beta_scaler_nuisance"}};
+
+model.generic.AddGlobal (meds.site.mg_rev, "meds.alpha_scaler", meds.site_alpha);
+model.generic.AddGlobal (meds.site.mg_rev, "meds.beta_scaler_test", meds.site_beta);
+model.generic.AddGlobal (meds.site.mg_rev, "meds.beta_scaler_nuisance", meds.site_beta_nuisance);
+parameters.DeclareGlobal (meds.scalers, {});
+
+
+//this is the stuff I think I need from meds???
+lfunction meds.rate.modifier (fromChar, toChar, namespace, model_type, model) {
+    baseline = Call (^"meds.site.mg_rev.rate", fromChar,toChar, namespace, model_type, model);
+    utility.EnsureKey (baseline, model_type);
+    selection.io.json_store_key_value_pair (baseline, model_type, utility.getGlobalValue("terms.meds.bias"), utility.getGlobalValue("meds.parameter.bias"));
+    selection.io.json_store_key_value_pair (baseline, model_type, utility.getGlobalValue("terms.meds.rate"), utility.getGlobalValue("meds.parameter.rate"));
+    baseline [utility.getGlobalValue("terms.model.rate_entry")] = parameters.AppendMultiplicativeTerm (baseline [utility.getGlobalValue("terms.model.rate_entry")], utility.getGlobalValue("meds.parameter.rate"));
+    if (toChar == model["meds.residue_bias"]) {
+        baseline [utility.getGlobalValue("terms.model.rate_entry")] =
+            parameters.AppendMultiplicativeTerm ( baseline [utility.getGlobalValue("terms.model.rate_entry")],
+                                                  "`utility.getGlobalValue("meds.parameter.bias")`/(1-Exp (-`utility.getGlobalValue("meds.parameter.bias")`))");
+     } else {
+        if (fromChar == model["meds.residue_bias"]) {
+            parameters.AppendMultiplicativeTerm ( baseline [utility.getGlobalValue("terms.model.rate_entry")],
+                                                  "`utility.getGlobalValue("meds.parameter.bias")`/(Exp (`utility.getGlobalValue("meds.parameter.bias")`-1))");
+        }
+    }
+    return baseline;
+}
+lfunction meds.biased.model.generator (type, residue) {
+    model = Call (^"meds.site.mg_rev", type);
+    utility.setGlobalValue("meds.site.mg_rev.rate", model[utility.getGlobalValue ("terms.model.q_ij")]);
+    model[utility.getGlobalValue ("terms.model.q_ij")] = "meds.rate.modifier";
+    model["meds.residue_bias"] = residue;
+    return model;
+}
+
+//----------------------------------------------------------------------------------------
+
+// I think this takes a likelihood and data and applies the scalers to each site
+// then tests for selection using the alt model where everything is allowed to vary?
+// and the null where everything is 1????
+lfunction meds.handle_a_site (lf, filter_data, partition_index, pattern_info, model_mapping) {
+
+
+
+    GetString (lfInfo, ^lf,-1);
+    ExecuteCommands (filter_data);
+    __make_filter ((lfInfo["Datafilters"])[0]);
+
+    utility.SetEnvVariable ("USE_LAST_RESULTS", TRUE);
+
+    if (^"meds.srv"){
+        ^"meds.alpha_scaler" = 1;
+    } else
+    {
+        ^"meds.alpha_scaler" := 1;
+    }
+    ^"meds.beta_scaler_test"  = 1;
+    ^"meds.beta_scaler_nuisance"  = 1;
+
+    Optimize (results, ^lf);
+    console.log( "this");
+
+    alternative = estimators.ExtractMLEs (lf, model_mapping);
+    alternative [utility.getGlobalValue("terms.fit.log_likelihood")] = results[1][0];
+
+    ^"meds.alpha_scaler" = (^"meds.alpha_scaler" + 3*^"meds.beta_scaler_test")/4;
+    parameters.SetConstraint ("meds.beta_scaler_test","meds.alpha_scaler", "");
+
+    Optimize (results, ^lf);
+    console.log( "that");
+
+    Null = estimators.ExtractMLEs (lf, model_mapping);
+
+
+    Null [utility.getGlobalValue("terms.fit.log_likelihood")] = results[1][0];
+
+
+    Export (lfs, ^lf);
+    fprintf (MESSAGE_LOG, lfs);
+    //assert (0);
+
+    return {utility.getGlobalValue("terms.alternative") : alternative, utility.getGlobalValue("terms.Null"): Null};
+}
+
+/* echo to screen calls */
+meds.report.counts        = {{0,0}};
+
+
+
+/* I don't think I need this bit for MEDS
+meds.report.positive_site = {{"" + (1+((meds.filter_specification[meds.report.partition])[terms.data.coverage])[meds.report.site]),
+                                    meds.report.partition + 1,
+                                    Format(meds.report.row[0],10,3),
+                                    Format(meds.report.row[1],10,3),
+                                    Format(meds.report.row[3],10,3),
+                                    "Pos. p = " + Format(meds.report.row[4],6,4)}};
+
+meds.report.negative_site = {{"" + (1+((meds.filter_specification[meds.report.partition])[terms.data.coverage])[meds.report.site]),
+                                    meds.report.partition + 1,
+                                    Format(meds.report.row[0],10,3),
+                                    Format(meds.report.row[1],10,3),
+                                    Format(meds.report.row[3],10,3),
+                                    "Neg. p = " + Format(meds.report.row[4],6,4)}};
+*/
+
+//think this is how everything get spit out into the markdown format???
+//don't think I need it either
+/*
+function meds.report.echo (meds.report.site, meds.report.partition, meds.report.row) {
+
+    meds.print_row = None;
+    if (meds.report.row [4] < meds.pvalue) {
+        if (meds.report.row[0] < meds.report.row[1]) {
+            meds.print_row = meds.report.positive_site;
+            meds.report.counts[0] += 1;
+        } else {
+            meds.print_row = meds.report.negative_site;
+            meds.report.counts [1] += 1;
+        }
+    }
+
+     if (None != meds.print_row) {
+            if (!meds.report.header_done) {
+                io.ReportProgressMessageMD("meds", "" + meds.report.partition, "For partition " + (meds.report.partition+1) + " these sites are significant at p <=" + meds.pvalue + "\n");
+                fprintf (stdout,
+                    io.FormatTableRow (meds.table_screen_output,meds.table_output_options));
+                meds.report.header_done = TRUE;
+                meds.table_output_options[terms.table_options.header] = FALSE;
+            }
+
+            fprintf (stdout,
+                io.FormatTableRow (meds.print_row,meds.table_output_options));
+
+        }
+
+}
+*/
+
+
+//do need results
+lfunction meds.store_results (node, result, arguments) {
+
+    partition_index = arguments [2];
+    pattern_info    = arguments [3];
+
+    result_row          = { { 0, // alpha
+                          0, // beta
+                          0, // alpha==beta
+                          0, // LRT
+                          1, // p-value,
+                          0  // total branch length of tested branches
+                      } };
+
+
+    if (None != result) { // not a constant site
+
+        lrt = math.DoLRT ((result[utility.getGlobalValue("terms.Null")])[utility.getGlobalValue("terms.fit.log_likelihood")],
+                          (result[utility.getGlobalValue("terms.alternative")])[utility.getGlobalValue("terms.fit.log_likelihood")],
+                          1);
+        result_row [0] = estimators.GetGlobalMLE (result[utility.getGlobalValue("terms.alternative")], ^"meds.site_alpha");
+        result_row [1] = estimators.GetGlobalMLE (result[utility.getGlobalValue("terms.alternative")], ^"meds.site_beta");
+        result_row [2] = estimators.GetGlobalMLE (result[utility.getGlobalValue("terms.Null")], ^"meds.site_beta");
+        result_row [3] = lrt [utility.getGlobalValue("terms.LRT")];
+        result_row [4] = lrt [utility.getGlobalValue("terms.p_value")];
+
+
+
+        sum = 0;
+        alternative_lengths = ((result[utility.getGlobalValue("terms.alternative")])[utility.getGlobalValue("terms.branch_length")])[0];
+
+        utility.ForEach (^"meds.case_respecting_node_names", "_node_",
+                '_node_class_ = ((^"meds.selected_branches")[`&partition_index`])[_node_];
+                 if (_node_class_ == utility.getGlobalValue("terms.tree_attributes.test")) {
+                    `&sum` += ((`&alternative_lengths`)[_node_])[utility.getGlobalValue("terms.fit.MLE")];
+                 }
+            ');
+
+        result_row [5] = sum;
+    }
+
+
+    utility.EnsureKey (^"meds.site_results", partition_index);
+/* I don't think I need this
+    utility.ForEach (pattern_info[utility.getGlobalValue("terms.data.sites")], "_meds_result_",
+        '
+            (meds.site_results[`&partition_index`])[_meds_result_] = `&result_row`;
+            meds.report.echo (_meds_result_, `&partition_index`, `&result_row`);
+        '
+    );
+
+*/
+    //assert (0);
+}
+//----------------------------------------------------------------------------------------
+
+meds.site_results = {};
+
+for (meds.partition_index = 0; meds.partition_index < meds.partition_count; meds.partition_index += 1) {
+    meds.report.header_done = FALSE;
+    meds.table_output_options[terms.table_options.header] = TRUE;
+    model.ApplyModelToTree( "meds.site_tree", meds.trees[meds.partition_index], {terms.default : meds.site.mg_rev}, None);
+
+    meds.case_respecting_node_names = trees.branch_names (meds.site_tree, TRUE);
+    //console.log(med.case_respecting_node_names);
+
+    meds.site_patterns = alignments.Extract_site_patterns ((meds.filter_specification[meds.partition_index])[utility.getGlobalValue("terms.data.name")]);
+
+    // apply constraints to the site tree
+    // alpha = alpha_scaler * branch_length
+    // beta  = beta_scaler_test * branch_length or beta_nuisance_test * branch_length
+
+    utility.ForEach (meds.case_respecting_node_names, "_node_",
+            '_node_class_ = (meds.selected_branches[meds.partition_index])[_node_];
+             if (_node_class_ == terms.tree_attributes.test) {
+                _beta_scaler = meds.scalers[1];
+             } else {
+                _beta_scaler = meds.scalers[2];
+             }
+             meds.apply_proportional_site_constraint ("meds.site_tree", _node_, meds.alpha, meds.beta, meds.scalers[0], _beta_scaler, (( meds.final_partitioned_mg_results[terms.branch_length])[meds.partition_index])[_node_]);
+        ');
+
+
+    // create the likelihood function for this site
+    ExecuteCommands (alignments.serialize_site_filter
+                                       ((meds.filter_specification[meds.partition_index])[utility.getGlobalValue("terms.data.name")],
+                                       ((meds.site_patterns[0])[utility.getGlobalValue("terms.data.sites")])[0],
+                   ));
+
+    __make_filter ("meds.site_filter");
+
+    LikelihoodFunction meds.site_likelihood = (meds.site_filter, meds.site_tree);
+
+
+
+    estimators.ApplyExistingEstimates ("meds.site_likelihood", meds.site_model_mapping, meds.final_partitioned_mg_results,
+                                        terms.globals_only);
+
+
+    meds.queue = mpi.CreateQueue ({"LikelihoodFunctions": {{"meds.site_likelihood"}},
+                                   "Models" : {{"meds.site.mg_rev"}},
+                                   "Headers" : {{"libv3/all-terms.bf"}},
+                                   "Variables" : {{"meds.srv"}}
+                                 });
+
+
+    /* run the main loop over all unique site pattern combinations */
+    utility.ForEachPair (meds.site_patterns, "_pattern_", "_pattern_info_",
+        '
+            if (_pattern_info_[terms.data.is_constant]) {
+                meds.store_results (-1,None,{"0" : "meds.site_likelihood",
+                                                                "1" : None,
+                                                                "2" : meds.partition_index,
+                                                                "3" : _pattern_info_,
+                                                                "4" : meds.site_model_mapping
+                                                                });
+            } else {
+                mpi.QueueJob (meds.queue, "meds.handle_a_site", {"0" : "meds.site_likelihood",
+                                                                "1" : alignments.serialize_site_filter
+                                                                   ((meds.filter_specification[meds.partition_index])[terms.data.name],
+                                                                   (_pattern_info_[utility.getGlobalValue("terms.data.sites")])[0]),
+                                                                "2" : meds.partition_index,
+                                                                "3" : _pattern_info_,
+                                                                "4" : meds.site_model_mapping
+                                                                },
+                                                                "meds.store_results");
+            }
+        '
+    );
+
+    mpi.QueueComplete (meds.queue);
+    meds.partition_matrix = {Abs (meds.site_results[meds.partition_index]), Rows (meds.table_headers)};
+
+    utility.ForEachPair (meds.site_results[meds.partition_index], "_key_", "_value_",
+    '
+        for (meds.index = 0; meds.index < Rows (meds.table_headers); meds.index += 1) {
+            meds.partition_matrix [0+_key_][meds.index] = _value_[meds.index];
+        }
+    '
+    );
+
+    meds.site_results[meds.partition_index] = meds.partition_matrix;
+
+
+}
+
+meds.json [terms.json.MLE ] = {terms.json.headers   : meds.table_headers,
+                               terms.json.content : meds.site_results };
+
+
+io.ReportProgressMessageMD ("meds", "results", "** Found _" + meds.report.counts[0] + "_ sites under pervasive positive diversifying and _" + meds.report.counts[1] + "_ sites under negative selection at p <= " + meds.pvalue + "**");
+
+
+return 0;
 
 
 /*---------Loading alignment and tree files-------------------------------------*/
@@ -77,7 +473,7 @@ siteShift 		= -1;  /*Used to standardize codon positions. Remember HyPhy indexes
 1) Estimate branch lengths by fitting a custom nuc model. These are used throughout.
 2) Fit foreground and background codon models, with all parameters except the nonsyn rate tied
 	between fg and bg. This is to get estimates of the nucleotide transition rates from a codon model.
-3) Site by site FEL directional selection analysis: Nuc transition rates are fixed from 2).
+3) Site by site meds directional selection analysis: Nuc transition rates are fixed from 2).
 	For each site, fit a positive selection null model that allows freely variable syn rate,
 	and nonsynBG rates but with nonsynFG constrained to equal syn. Fit a second positive selection
 	model, with nonsynFG unconstrained. An LRT is used to determine whether the unconstrained
@@ -101,11 +497,11 @@ utility.SetEnvVariable("COUNT_GAPS_IN_FREQUENCIES", 0);
 //LoadFunctionLibrary ("chooseGeneticCode");
 
 
-SenseCodons = genetic_code.CountSense(fitter.codon_data_info [utility.getGlobalValue("terms.code")]);
+SenseCodons = genetic_code.CountSense(meds.codon_data_info [utility.getGlobalValue("terms.code")]);
 
 
 /*---------Estimate Branch Lengths Using Nucleotide Model-----------------------*/
-//DataSetFilter myFilter = CreateFilter (fitter.codon_data,1);
+//DataSetFilter myFilter = CreateFilter (meds.codon_data,1);
 //fprintf(stdout, "%s\n", myFilter);
 //HarvestFrequencies (obsNucFreqs, myFilter, 1, 1, 1);
 
@@ -118,7 +514,7 @@ SenseCodons = genetic_code.CountSense(fitter.codon_data_info [utility.getGlobalV
 nucBiasMult = {{"AC*","","AT*","CG*","CT*","GT*"}};
 
 //this pulls out the efv of the gtr results
-obsNucFreqs = (fitter.gtr_results[utility.getGlobalValue("terms.efv_estimate")])["VALUEINDEXORDER"][0];
+obsNucFreqs = (meds.gtr_results[utility.getGlobalValue("terms.efv_estimate")])["VALUEINDEXORDER"][0];
 
 /*Initialises and populates a matrix of string values nuc multipliers*/
 customRateString = {{"*","","",""}
@@ -194,7 +590,7 @@ FG = model.generic.DefineModel("models.DNA.GTR.ModelDescription",
         name_space, {
             "0": terms.local
         },
-        fitter.filter_names,
+        meds.filter_names,
         None);
 */
 //this doesn't work
@@ -221,22 +617,22 @@ Tree givenTree = treeString[^"terms.data.tree"];
 fprintf (stdout, "\n\n[PHASE 1. Estimating Branch Lengths using a Nucleotide Model]\n");
 
 /*
-LikelihoodFunction theLikFun = (fitter.nuc_filter, givenTree, obsFreqs);
+LikelihoodFunction theLikFun = (meds.nuc_filter, givenTree, obsFreqs);
 Optimize (paramValues, theLikFun);
 fprintf (stdout, theLikFun);
 */
 
-fitter.partitions_and_trees = trees.LoadAnnotatedTreeTopology.match_partitions(
-    fitter.codon_data_info[terms.data.partitions],
-    fitter.name_mapping);
+meds.partitions_and_trees = trees.LoadAnnotatedTreeTopology.match_partitions(
+    meds.codon_data_info[terms.data.partitions],
+    meds.name_mapping);
 
-fitter.trees = utility.Map(fitter.partitions_and_trees, "_partition_", '_partition_[terms.data.tree]');
-fitter.filter_specification = alignments.DefineFiltersForPartitions(fitter.partitions_and_trees, "fitter.codon_data" , "fitter.filter.", fitter.codon_data_info);
-fitter.filter_names = utility.Map (fitter.filter_specification, "_partition_", '_partition_[terms.data.name]');
-//fitter.store_tree_information();
+meds.trees = utility.Map(meds.partitions_and_trees, "_partition_", '_partition_[terms.data.tree]');
+meds.filter_specification = alignments.DefineFiltersForPartitions(meds.partitions_and_trees, "meds.codon_data" , "meds.filter.", meds.codon_data_info);
+meds.filter_names = utility.Map (meds.filter_specification, "_partition_", '_partition_[terms.data.name]');
+//meds.store_tree_information();
 
 
-nucleotide_results = estimators.FitSingleModel_Ext ( fitter.filter_names, fitter.trees, "FG", fitter.gtr_results,
+nucleotide_results = estimators.FitSingleModel_Ext ( meds.filter_names, meds.trees, "FG", meds.gtr_results,
    {
         utility.getGlobalValue  ("terms.run_options.model_type"): utility.getGlobalValue("terms.global"),
         utility.getGlobalValue  ("terms.run_options.retain_lf_object"): TRUE,
@@ -248,12 +644,12 @@ nucleotide_results = estimators.FitSingleModel_Ext ( fitter.filter_names, fitter
 //estimators.BuildLFObject (lf_id, data_filter, tree, model_map, initial_values, model_objects, run_options)
 //estimators.BuildLFObject ("busted_sim.lf", busted_sim.filter_names,
 //busted_sim.trees, busted_sim.model_map, busted_sim.gtr_results, busted_sim.model_object_map, None);
-//fitter.model_object_map = { "busted_sim.background" : busted_sim.background.bsrel_model,
+//meds.model_object_map = { "busted_sim.background" : busted_sim.background.bsrel_model,
                                 //    "busted_sim.test" :       busted_sim.test.bsrel_model };
 
 //this doeadn't work yet either
-estimators.BuildLFObject("nuc.lf", fitter.filter_names, fitter.trees,
-                          fitter.model_map, fitter.gtr_results, fitter.model_object_map, None);
+estimators.BuildLFObject("nuc.lf", meds.filter_names, meds.trees,
+                          meds.model_map, meds.gtr_results, meds.model_object_map, None);
 
 
 
