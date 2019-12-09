@@ -122,3 +122,25 @@ lfunction models.codon.SDT._GenerateRate_generic (fromChar, toChar, namespace, m
     }
     return _GenerateRate.p;
 }
+
+/* add a function that checks if the next codon has a difference in the first codon */
+/* okay we know that a in order for a double hit to span codons it has to be in
+the last position of 1st codon and first position of the second codon
+For triple hits that span codons we need to consider the last two and first nucleotides
+and the last one and first two codons. */
+
+lfunction models.codon.diff.2_hits (a,b) {
+    r = {};
+
+    for (i = 0; i < 2; i += 1) {
+        if (a[i+1] != b[i+1]) {
+            r + {
+                utility.getGlobalValue("terms.diff.from") : a[i],
+                utility.getGlobalValue("terms.diff.to") : b[i],
+                utility.getGlobalValue("terms.diff.position") : i
+            };
+        }
+    }
+
+    return r;
+}
